@@ -22,8 +22,8 @@ void randmfp32(int32_t M, int32_t N, float* Adata) {
   int32_t i, j;
   for (i=0; i<M; i++) {
     for (j=0; j<N; j++) {
-      //Adata[i*N + j] = rand() % 10;
-      Adata[i*N + j] = (float)(i+j);
+      Adata[i*N + j] = rand() % 10;
+      //Adata[i*N + j] = (float)(i+j);
     }
   }
   return;
@@ -196,6 +196,23 @@ void mmultfp32window(int32_t M, int32_t K, int32_t N, float* Adata, float* Bdata
   }  
 }
 
+void mmultfp32naive(int32_t M, int32_t K, int32_t N, float* Adata, float* Bdata, float* Cdata) {
+  // A is MxK (M rows, K columns)
+  // B is KXN
+  // Calculates C = AB
+  int32_t i, j, k;
+  double temp;
+  for (i=0; i<M; i++) {
+    for (j=0; j<N; j++) {
+      temp = 0;
+      for (k=0; k<K; k++) {
+        temp += Adata[i*K + k] * Bdata[k*N + j];
+      }
+      Cdata[i*N + j] = temp;
+    }
+  }
+}
+
 void main(int32_t argc, char* argv[]) {
 
   if (argc == 1) {
@@ -226,6 +243,7 @@ void main(int32_t argc, char* argv[]) {
   float* Bdata = newmfp32(K, N);
   randmfp32(K,N, Bdata);
   float* Cdata = newmfp32(M, N);
+  float* Cdata2 = newmfp32(M, N);
   uint64_t duration, starttime = time(0);
   mmultfp32(M, K, N, Adata, Bdata, Cdata);
   uint64_t endtime = time(0);
@@ -235,13 +253,22 @@ void main(int32_t argc, char* argv[]) {
   printf("Duration = %li s (%i Threads)\n", duration, numthreads);
   if (duration > 0) printf("%f GMKN/s\n", 1L*M*K*N/(1000000000.0*duration));  
   starttime = time(0);
-  mmultfp32window(M, K, N, Adata, Bdata, Cdata);
+  mmultfp32window(M, K, N, Adata, Bdata, Cdata2);
   endtime = time(0);
-  printsummfp32(M, N, Cdata);
+  printsummfp32(M, N, Cdata2);
   printf("M*K*N = %i*%i*%i* = %li \n",M, K, N, 1L*M*K*N);
   duration = endtime - starttime;
   printf("Duration = %li s (1 Thread)\n", duration);
   if (duration > 0) printf("%f GMKN/s\n", 1L*M*K*N/(1000000000.0*duration));
+  float sad;
+  uint32_t i, j;
+  sad = 0.0;
+  for (i=0; i<M; i++) {
+    for (j=0; j<N; j++) {
+      sad += fabs(Cdata[i*N + j] - Cdata2[i*N + j]);
+    }
+  } 
+  printf("SAD = %f\n", sad);
   //printmfp32(M, K, Adata);
   //printmfp32(K, N, Bdata);
   //printmfp32(M, N, Cdata);
