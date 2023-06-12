@@ -5,7 +5,7 @@
 #include <time.h>
 #include <pthread.h>
 
-// gcc mmult3.c -o mmult3.bin -O3 -pthread -ffast-math 
+// gcc mmult3.c -o mmult3.bin -O3 -pthread -ffast-math -march=native
 
 int32_t numthreads;
 typedef struct {
@@ -54,6 +54,39 @@ void printsummfp32(int32_t M, int32_t N, float* Adata) {
   }
   printf("Sum = %lf\n", temp);
 }
+
+void mtransposefp32b(int32_t M, int32_t N, float* Adata, float* Cdata) {
+  // C = A^T
+  int32_t j, k, j2, k2, j2M, blocksize, rblock, cblock, kpcblock;
+  blocksize = 64;
+  for (j=0; j<N; j+=blocksize) {
+    for (k=0; k<M; k+=blocksize) {
+      rblock = blocksize;
+      cblock = blocksize;
+      if ((k + blocksize) >= M) cblock = M - k;
+      if ((j + blocksize) >= N) rblock = N - j;
+      for (j2=j; j2<j+rblock; j2++) {
+        j2M = j2*M;
+        kpcblock = k+cblock;
+        for (k2=k; k2<kpcblock; k2++) {
+          Cdata[j2M + k2] = Adata[k2*N + j2];
+        }
+      }
+    }
+  }  
+}
+
+void mtransposefp32(int32_t M, int32_t N, float* Adata, float* Cdata) {
+  // C = A^T
+  int32_t j, k;
+  if ((int64_t)M*N >= 10000) return mtransposefp32b(M, N, Adata, Cdata);
+  for (j=0; j<N; j++) {
+    for (k=0; k<M; k++) {
+      Cdata[j*M + k] = Adata[k*N + j];
+    }
+  }  
+}
+
 void *mmultfp32t(void* ptr) {
   mmultfp32t_t *mmultfp32targs = (mmultfp32t_t*)ptr;
   int32_t M = mmultfp32targs->M;
@@ -90,11 +123,7 @@ void mmultfp32(int32_t M, int32_t K, int32_t N, float* Adata, float* Bdata, floa
   Arowsperthread = M/numthreads;
   //printf("Using %i threads and %i rows per thread.\n", numthreads, Arowsperthread);
   Atrailingrows = M - Arowsperthread*numthreads;
-  for (j=0; j<N; j++) {
-    for (k=0; k<K; k++) {
-      BdataT[j*K + k] = Bdata[k*N + j];
-    }
-  }
+  mtransposefp32b(K, N, Bdata, BdataT);
   pthread_t *threadid = malloc(numthreads*sizeof(pthread_t));
   mmultfp32t_t *mmultfp32targs = malloc(numthreads*sizeof(mmultfp32t_t));
   if (Arowsperthread > 0) {
@@ -124,6 +153,47 @@ void mmultfp32(int32_t M, int32_t K, int32_t N, float* Adata, float* Bdata, floa
     pthread_join(threadid[0], NULL);
   };
   free(BdataT);
+}
+
+#define MMULTWINDOWSIZE 32
+void mmultfp32window(int32_t M, int32_t K, int32_t N, float* Adata, float* Bdata, float* Cdata) {
+  // A is MxK (M rows, K columns)
+  // B is KXN
+  // Calculates C = AB
+  float* BdataT = newmfp32(K, N);
+  int32_t ii, jj, i, j, k, windowsize, winrows, wincols;
+  mtransposefp32b(K, N, Bdata, BdataT);
+  windowsize = MMULTWINDOWSIZE;
+  float wincolA[MMULTWINDOWSIZE];
+  float wincolBT[MMULTWINDOWSIZE];
+  float Sum[MMULTWINDOWSIZE][MMULTWINDOWSIZE] = {{0.0}};
+  for (i=0; i<M; i+=windowsize) {
+    for (j=0; j<N; j+=windowsize) {
+      winrows = windowsize;
+      wincols = windowsize;
+      if (j+wincols > N) wincols = N - j;
+      if (i+winrows > M) winrows = M - i;
+      for (k=0; k<K; k++) {
+        for (ii=0; ii<winrows; ii++) {
+          wincolA[ii] = Adata[(i+ii)*K + k];
+        }
+        for (jj=0; jj<wincols; jj++) {
+          wincolBT[jj] = BdataT[(j+jj)*K + k];
+        }        
+        for (ii=0; ii<winrows; ii++) {
+          for (jj=0; jj<wincols; jj++) {
+            Sum[ii][jj] += wincolA[ii]*wincolBT[jj];
+          }
+        }
+      }
+      for (ii=0; ii<winrows; ii++) {
+        for (jj=0; jj<wincols; jj++) {
+          Cdata[(i+ii)*N + j + jj] = Sum[ii][jj];
+          Sum[ii][jj] = 0.0;
+        }
+      }
+    }
+  }  
 }
 
 void main(int32_t argc, char* argv[]) {
@@ -156,54 +226,24 @@ void main(int32_t argc, char* argv[]) {
   float* Bdata = newmfp32(K, N);
   randmfp32(K,N, Bdata);
   float* Cdata = newmfp32(M, N);
-  randmfp32(M,N, Cdata);
   uint64_t duration, starttime = time(0);
   mmultfp32(M, K, N, Adata, Bdata, Cdata);
   uint64_t endtime = time(0);
   printsummfp32(M, N, Cdata);
   printf("M*K*N = %i*%i*%i* = %li \n",M, K, N, 1L*M*K*N);
   duration = endtime - starttime;
-  printf("Duration = %li s\n", duration);
+  printf("Duration = %li s (%i Threads)\n", duration, numthreads);
+  if (duration > 0) printf("%f GMKN/s\n", 1L*M*K*N/(1000000000.0*duration));  
+  starttime = time(0);
+  mmultfp32window(M, K, N, Adata, Bdata, Cdata);
+  endtime = time(0);
+  printsummfp32(M, N, Cdata);
+  printf("M*K*N = %i*%i*%i* = %li \n",M, K, N, 1L*M*K*N);
+  duration = endtime - starttime;
+  printf("Duration = %li s (1 Thread)\n", duration);
   if (duration > 0) printf("%f GMKN/s\n", 1L*M*K*N/(1000000000.0*duration));
   //printmfp32(M, K, Adata);
   //printmfp32(K, N, Bdata);
   //printmfp32(M, N, Cdata);
 }
 
-/*
-1st Gen Core i5...
-simon@simon-Inspiron-N5040:~$ ./mmult3.bin 2048 2048 2048
-Sum = 38996020272556032.000000
-M*K*N = 2048*2048*2048* = 8589934592 
-Duration = 2 s
-4.294967 GMKN/s
-
-simon@simon-Inspiron-N5040:~$ ./mmult3.bin 3072 3072 3072
-Sum = 296215056168753152.000000
-M*K*N = 3072*3072*3072* = 28991029248 
-Duration = 9 s
-3.221225 GMKN/s
-
-simon@simon-Inspiron-N5040:~$ ./mmult3.bin 4096 4096 4096
-Sum = 1248435409172154368.000000
-M*K*N = 4096*4096*4096* = 68719476736 
-Duration = 20 s
-3.435974 GMKN/s
-
-simon@simon-Inspiron-N5040:~$ ./mmult3.bin 8192 8192 8192
-Sum = 39958938915763929088.000000
-M*K*N = 8192*8192*8192* = 549755813888 
-Duration = 166 s
-3.311782 GMKN/s
-
-Sum = 19709172257120206848.000000
-M*K*N = 5678*6543*9876* = 366904796904 
-Duration = 113 s
-3.246945 GMKN/s
-
-simon@simon-Inspiron-N5040:~$ ./mmult3.bin 16000 16000 16000
-Sum = 1135826265088375128064.000000
-M*K*N = 16000*16000*16000* = 4096000000000 
-
-
-*/
